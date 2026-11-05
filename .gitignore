@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Model checkpoints and embeddings
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+*.pth
+
+# Output and logs
+output/
+logs/
+hpc_output/
+runs/
+*.txt.bak
+
+# TensorBoard
+tensorboard/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

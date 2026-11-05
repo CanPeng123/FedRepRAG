@@ -1,0 +1,88 @@
+import os
+import argparse
+import sys
+import json
+from datetime import datetime
+
+
+# --------------------------
+# Argument
+# --------------------------
+def parse_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--client_train_dir", type=str, required=True, help="Directory containing client_*.json files")
+    parser.add_argument("--val_json", type=str, required=True)
+    parser.add_argument("--test_json", type=str, default=None)
+
+    parser.add_argument("--images_root", type=str, default="", help="Optional root to prepend to relative image paths in problems.json")
+    parser.add_argument("--client_embeddings_dir", type=str, required=True, help="Directory containing client_i/embeddings_train.pt for local retrieval")
+    parser.add_argument("--embedding_output_mode", type=str, default="concat", choices=["weighted_avg", "concat"], help="Retrieval embedding aggregate strategy: weighted_avg or concat.")
+    parser.add_argument("--lang", type=str, default="en", choices=["en", "zh"], help="Filter question language (en or zh).")
+
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-VL-7B-Instruct")
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--top_k", type=int, default=1)
+
+    parser.add_argument("--ckpt_dir", type=str, default=None, help="Directory to save per-epoch checkpoints")
+    parser.add_argument("--tb_dir", type=str, default="runs/injection_mlp", help="TensorBoard log dir")
+    parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint to resume from")
+
+    parser.add_argument("--stage1_pretrain", action="store_true", help="Run RepRAG-style stage-1 pretraining")
+    parser.add_argument("--stage1_epochs", type=int, default=2)
+    parser.add_argument("--stage1_evidence_topk", type=int, default=1)
+    parser.add_argument("--stage1_target_max_tokens", type=int, default=256)
+    parser.add_argument("--stage1_lr", type=float, default=None, help="Override lr for stage-1 if set")
+    parser.add_argument("--stage1_eval_every", type=int, default=200, help="Evaluation frequency")
+    parser.add_argument("--stage1_resume_ckpt", type=str, default=None,
+                        help="Path to a stage-1 checkpoint to resume from (already-completed rounds are skipped)")
+
+    parser.add_argument("--stage2_finetuning", action="store_true", help="Run RepRAG-style stage-2 finetuning")
+    parser.add_argument("--stage2_init_ckpt", type=str, default=None, help="ckpt to start stage 2 training")
+    parser.add_argument("--stage2_epochs", type=int, default=2)
+    parser.add_argument("--stage2_finetune_topk", type=int, default=1)
+    parser.add_argument("--stage2_eval_every", type=int, default=200, help="Evaluation frequency")
+    parser.add_argument("--stage2_lr", type=float, default=None, help="Override lr for stage-2 if set")
+    parser.add_argument("--stage2_wo_kl", action="store_true", help="Remove REPRAG Knowledge Distillation loss")
+
+    parser.add_argument("--eval_only", action="store_true", help="Only run evaluation, no training.")
+    parser.add_argument("--eval_split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument("--eval_stage", type=str, default="stage2", choices=["stage1", "stage2"])
+    parser.add_argument("--eval_ckpt", type=str, default=None, help="Path to MLP checkpoint (.pt) to evaluate.")
+
+    parser.add_argument(
+        "--eval_client_id",
+        type=int,
+        default=0,
+        help="Client retrieval bank used for evaluation. Set to -1 to evaluate on all clients; otherwise use a single client index such as 0, 1, 2, ..."
+    )
+
+    parser.add_argument("--fl_method", type=str, default="fedRepRag", choices=["fedRepRag"])
+    parser.add_argument("--comm_rounds", type=int, default=10)
+    parser.add_argument("--local_epochs", type=int, default=1)
+
+    return parser.parse_args()
+
+
+def dump_args_to_logdir(args, log_dir: str, filename: str = "arg_info.txt"):
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(log_dir, filename)
+
+    args_dict = vars(args)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("=== Argument dump ===\n")
+        f.write(f"time: {datetime.now().isoformat(timespec='seconds')}\n")
+        f.write(f"log_dir: {log_dir}\n\n")
+
+        f.write("[args: pretty]\n")
+        for k in sorted(args_dict.keys()):
+            f.write(f"{k}: {args_dict[k]}\n")
+
+        f.write("\n\n[args: json]\n")
+        json.dump(args_dict, f, indent=2, sort_keys=True, ensure_ascii=False)
+        f.write("\n")
+
+    print(f"[Log] Saved args to: {path}")

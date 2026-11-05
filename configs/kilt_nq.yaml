@@ -1,0 +1,144 @@
+# KILT-NQ Open-Domain QA — centralized and federated experiments
+#
+# Run:  python run.py --config configs/kilt_nq.yaml --stage <stage>
+#
+# Stages
+#   get_embedding    Build retrieval embeddings (question + content, dual-mode)
+#   no_rag           Baseline inference (no retrieval)
+#   incontext        In-context retrieval RAG inference
+#   mlp_train        Centralized MLP projector training (Stage 1 + Stage 2)
+#   fl_mlp_train     Federated MLP projector training via FedRepRag
+#   mlp_infer        MLP-injected retrieval inference (eval a trained checkpoint)
+#   fl_mlp_infer     FL MLP-injected inference (eval a trained FL checkpoint)
+
+stages:
+
+  get_embedding:
+    # embed_mode=both generates:
+    #   kilt_nq_embeddings_train.pt         (question embeddings → FAISS index)
+    #   kilt_nq_content_embeddings_train.pt (content embeddings  → MLP input)
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_get_retrival_embedding.py
+    args:
+      model:      qwen3:8b
+      data_jsonl:  datasets/KILT_NQ/train.jsonl
+      embed_mode: both
+      split:      train
+      batch_size: 1
+      out_dir:    output/KILT_NQ/train_embeddings/Qwen3_8b_train_both
+    flags: [use_deepspeed, store_embeddings]
+
+  no_rag:
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_wo_retrival.py
+    args:
+      model:          qwen3:8b
+      data_jsonl:     datasets/KILT_NQ/validation.jsonl
+      split:          validation
+      batch_size:     1
+      max_new_tokens: 32
+      out_dir:        output/KILT_NQ/wo_rag
+    flags: [use_deepspeed]
+
+  incontext:
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_w_retrival.py
+    args:
+      model:                 qwen3:8b
+      data_jsonl:            datasets/KILT_NQ/validation.jsonl
+      split:                 validation
+      retrieval_mode:        incontext
+      train_jsonl:           datasets/KILT_NQ/train.jsonl
+      train_embeddings_path: output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_embeddings_train.pt
+      top_k:                 3
+      batch_size:            1
+      max_new_tokens:        32
+      out_dir:               output/KILT_NQ/incontext_rag_top3
+    flags: [use_deepspeed]
+
+  mlp_train:
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_w_retrival_MLP_train.py
+    args:
+      model_name:               Qwen/Qwen3-8B
+      train_jsonl:              datasets/KILT_NQ/train.jsonl
+      train_embeddings_path:    output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_embeddings_train.pt
+      content_embeddings_path:  output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_content_embeddings_train.pt
+      val_jsonl:                datasets/KILT_NQ/validation.jsonl
+      batch_size:               1
+      stage1_pretrain:          true
+      stage1_epochs:            10
+      stage1_lr:                6e-3
+      stage1_target_max_tokens: 256
+      stage1_eval_every:        20000
+      # stage2_init_ckpt: pass via --stage2_init_ckpt <path>
+      stage2_epochs:            10
+      stage2_lr:                2e-5
+      stage2_finetune_topk:     3
+      stage2_answer_max_tokens: 16
+      stage2_eval_every:        20000
+      eval_max_new_tokens:      32
+      val_encode_batch_size:    1
+      ckpt_dir:                 output/KILT_NQ/mlp_train_centralized
+      tb_dir:                   output/KILT_NQ/mlp_train_centralized/tensorboard
+    flags: [stage2_finetuning, stage2_wo_kl]
+
+  fl_mlp_train:
+    script: src/VQA/main_KILT_NQ/FL_Qwen3_Batch_KILT_NQ_VQA_w_retrival_MLP_train.py
+    args:
+      model_name:                    Qwen/Qwen3-8B
+      client_corpus_dir:             datasets/KILT_NQ/FL_split/kilt_nq_FL_C10_K50_alpha0_1/corpus_clients
+      global_question_embeddings_path: output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_embeddings_train.pt
+      global_content_embeddings_path:  output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_content_embeddings_train.pt
+      val_jsonl:                     datasets/KILT_NQ/validation.jsonl
+      batch_size:                    1
+      stage1_epochs:                 10
+      stage1_lr:                     6e-3
+      stage1_target_max_tokens:      256
+      stage1_eval_every:             5000
+      # stage2_init_ckpt: pass via --stage2_init_ckpt <path>
+      stage2_epochs:                 10
+      stage2_lr:                     2e-5
+      stage2_finetune_topk:          3
+      stage2_answer_max_tokens:      16
+      stage2_eval_every:             5000
+      fl_method:                     fedRepRag
+      comm_rounds:                   10
+      local_epochs:                  1
+      eval_client_id:                0
+      val_encode_batch_size:         1
+      eval_max_new_tokens:           32
+      acc_every:                     50
+      ckpt_dir:                      output/KILT_NQ/FL/mlp_train
+      tb_dir:                        output/KILT_NQ/FL/mlp_train/tensorboard
+    flags: [stage1_pretrain, stage2_finetuning]
+
+  mlp_infer:
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_w_retrival.py
+    args:
+      model:                    qwen3:8b
+      data_jsonl:               datasets/KILT_NQ/validation.jsonl
+      split:                    validation
+      retrieval_mode:           embed_prefix_w_train
+      train_jsonl:              datasets/KILT_NQ/train.jsonl
+      train_embeddings_path:    output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_embeddings_train.pt
+      content_embeddings_path:  output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_content_embeddings_train.pt
+      # retrieval_mlp_ckpt: pass via --retrieval_mlp_ckpt <path>
+      top_k:                    3
+      batch_size:               1
+      max_new_tokens:           32
+      out_dir:                  output/KILT_NQ/mlp_rag_top3
+    flags: [use_deepspeed]
+
+  fl_mlp_infer:
+    script: src/VQA/main_KILT_NQ/Qwen3_Batch_KILT_NQ_VQA_w_retrival.py
+    args:
+      model:                    qwen3:8b
+      data_jsonl:               datasets/KILT_NQ/validation.jsonl
+      split:                    validation
+      retrieval_mode:           embed_prefix_w_train
+      train_jsonl:              datasets/KILT_NQ/train.jsonl
+      train_embeddings_path:    output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_embeddings_train.pt
+      content_embeddings_path:  output/KILT_NQ/train_embeddings/Qwen3_8b_train_both/kilt_nq_content_embeddings_train.pt
+      # retrieval_mlp_ckpt: pass via --retrieval_mlp_ckpt <path>
+      top_k:                    3
+      batch_size:               1
+      max_new_tokens:           32
+      out_dir:                  output/KILT_NQ/FL/mlp_infer
+    flags: [use_deepspeed]

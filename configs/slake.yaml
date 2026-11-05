@@ -1,0 +1,174 @@
+# SLAKE Medical VQA — centralized and federated experiments
+#
+# Run:  python run.py --config configs/slake.yaml --stage <stage>
+#
+# Stages
+#   get_embedding     Build FAISS retrieval index from the full training set
+#   no_rag            Baseline inference (no retrieval)
+#   incontext         In-context retrieval RAG inference
+#   mlp_train         Centralized MLP projector training (Stage 1 + Stage 2)
+#   fl_get_embedding  Build per-client retrieval indices  (FL)
+#   fl_mlp_train      Federated MLP projector training via FedRepRag
+#   fl_incontext      Per-client in-context RAG inference (FL)
+
+stages:
+
+  get_embedding:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_get_retrieval_embedding.py
+    args:
+      problems_json:  datasets/SLAKE/train.json
+      images_root:    datasets/SLAKE/imgs
+      split:          train
+      lang:           en
+      model:          qwen2_5-vl-instruct:7b
+      batch_size:     1
+      max_new_tokens: 32
+      out_dir:        output/SLAKE/train_embedding
+    flags: [use_deepspeed, store_embeddings, embeddings_w_gold, debug_generate]
+
+  no_rag:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival.py
+    args:
+      train_json:            datasets/SLAKE/train.json
+      problems_json:         datasets/SLAKE/test.json
+      images_root:           datasets/SLAKE/imgs
+      split:                 test
+      lang:                  en
+      model:                 qwen2_5-vl-instruct:7b
+      retrieval_mode:        none
+      retrieved_visual:      none
+      train_embeddings_path: output/SLAKE/train_embedding/slake_embeddings_train.pt
+      top_k:                 5
+      batch_size:            1
+      max_new_tokens:        8
+      out_dir:               output/SLAKE/wo_rag
+    flags: [use_deepspeed]
+
+  incontext:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival.py
+    args:
+      train_json:            datasets/SLAKE/train.json
+      problems_json:         datasets/SLAKE/test.json
+      images_root:           datasets/SLAKE/imgs
+      split:                 test
+      lang:                  en
+      model:                 qwen2_5-vl-instruct:7b
+      retrieval_mode:        incontext
+      retrieved_visual:      none
+      train_embeddings_path: output/SLAKE/train_embedding/slake_embeddings_train.pt
+      top_k:                 5
+      batch_size:            1
+      max_new_tokens:        8
+      out_dir:               output/SLAKE/incontext_rag_top5
+    flags: [use_deepspeed]
+
+  mlp_infer:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival.py
+    args:
+      train_json:            datasets/SLAKE/train.json
+      problems_json:         datasets/SLAKE/test.json
+      images_root:           datasets/SLAKE/imgs
+      split:                 test
+      lang:                  en
+      model:                 qwen2_5-vl-instruct:7b
+      retrieval_mode:        embed_prefix_w_train
+      embedding_output_mode: concat
+      retrieved_visual:      none
+      train_embeddings_path: output/SLAKE/train_embedding/slake_embeddings_train.pt
+      top_k:                 5
+      batch_size:            1
+      max_new_tokens:        8
+      out_dir:               output/SLAKE/mlp_rag_top5
+    flags: [use_deepspeed]
+
+  mlp_train:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival_MLP_train.py
+    args:
+      train_json:             datasets/SLAKE/train.json
+      val_json:               datasets/SLAKE/validate.json
+      test_json:              datasets/SLAKE/test.json
+      images_root:            datasets/SLAKE/imgs
+      train_embeddings_path:  output/SLAKE/train_embedding/slake_embeddings_train.pt
+      model_name:             Qwen/Qwen2.5-VL-7B-Instruct
+      batch_size:             1
+      embedding_output_mode:  concat
+      stage1_epochs:          20
+      stage1_evidence_topk:   1
+      stage1_target_max_tokens: 256
+      stage1_lr:              6e-3
+      stage1_eval_every:      2000
+      # stage2_init_ckpt: pass via --stage2_init_ckpt <path>
+      stage2_epochs:          20
+      stage2_finetune_topk:   5
+      stage2_lr:              2e-5
+      stage2_eval_every:      2000
+      ckpt_dir:               output/SLAKE/mlp_train
+      tb_dir:                 output/SLAKE/mlp_train/tensorboard
+    flags: [stage2_finetuning, stage2_wo_kl]
+
+  fl_get_embedding:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_get_retrieval_embedding.py
+    foreach_client:
+      n: 10
+      iter_args:
+        problems_json: datasets/SLAKE/client_split_train_by_location_alpha_0dot1_lang_en/client_{i}.json
+        out_dir:       output/SLAKE_FL/train_embedding/client_{i}
+    args:
+      images_root:    datasets/SLAKE/imgs
+      split:          train
+      lang:           en
+      model:          qwen2_5-vl-instruct:7b
+      batch_size:     1
+      max_new_tokens: 32
+    flags: [use_deepspeed, store_embeddings, embeddings_w_gold, debug_generate]
+
+  fl_mlp_train:
+    script: src/VQA/main_SLAKE/FL_Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival_MLP_train.py
+    args:
+      client_train_dir:       datasets/SLAKE/client_split_train_by_location_alpha_0dot1_lang_en
+      val_json:               datasets/SLAKE/validate.json
+      test_json:              datasets/SLAKE/test.json
+      client_embeddings_dir:  output/SLAKE_FL/train_embedding
+      images_root:            datasets/SLAKE/imgs
+      lang:                   en
+      model_name:             Qwen/Qwen2.5-VL-7B-Instruct
+      batch_size:             1
+      embedding_output_mode:  concat
+      stage1_epochs:          25
+      stage1_evidence_topk:   1
+      stage1_target_max_tokens: 256
+      stage1_lr:              6e-3
+      stage1_eval_every:      5000
+      # stage2_init_ckpt: pass via --stage2_init_ckpt <path>
+      stage2_epochs:          25
+      stage2_finetune_topk:   5
+      stage2_lr:              2e-5
+      stage2_eval_every:      5000
+      fl_method:              fedRepRag
+      comm_rounds:            25
+      local_epochs:           1
+      eval_client_id:         0
+      ckpt_dir:               output/SLAKE_FL/mlp_train
+      tb_dir:                 output/SLAKE_FL/mlp_train/tensorboard
+    flags: [stage1_pretrain, stage2_finetuning, stage2_wo_kl]
+
+  fl_incontext:
+    script: src/VQA/main_SLAKE/Qwen2dot5VL_Batch_SLAKE_VQA_w_retrival.py
+    foreach_client:
+      n: 10
+      iter_args:
+        train_json:            datasets/SLAKE/client_split_train_by_location_alpha_0dot1_lang_en/client_{i}.json
+        train_embeddings_path: output/SLAKE_FL/train_embedding/client_{i}/slake_embeddings_train.pt
+        out_dir:               output/SLAKE_FL/incontext_rag_top5/client_{i}
+    args:
+      problems_json:    datasets/SLAKE/test.json
+      images_root:      datasets/SLAKE/imgs
+      split:            test
+      lang:             en
+      model:            qwen2_5-vl-instruct:7b
+      retrieval_mode:   incontext
+      retrieved_visual: none
+      top_k:            5
+      batch_size:       1
+      max_new_tokens:   8
+    flags: [use_deepspeed]

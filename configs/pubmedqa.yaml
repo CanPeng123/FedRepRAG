@@ -1,0 +1,173 @@
+# PubMedQA Medical QA — centralized and federated experiments
+#
+# Run:  python run.py --config configs/pubmedqa.yaml --stage <stage>
+#
+# Stages
+#   get_embedding        Build corpus embeddings (question + content, dual-mode)
+#   get_fl_embedding     Build per-client corpus embeddings for FL
+#   get_fl_train_embedding  Build per-client labeled question embeddings for Stage 2
+#   no_rag               Baseline inference (no retrieval)
+#   incontext            In-context retrieval RAG inference (combined pool)
+#   mlp_train            Centralized MLP projector training (Stage 1 + Stage 2)
+#   fl_mlp_train         Federated MLP projector training via FedRepRag
+#   mlp_infer            MLP-injected retrieval inference (eval a trained checkpoint)
+
+stages:
+
+  get_embedding:
+    # Generates two embedding files in one pass:
+    #   pubmedqa_embeddings_corpus.pt         (question embeddings  → FAISS index)
+    #   pubmedqa_content_embeddings_corpus.pt (content embeddings   → MLP input)
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_get_retrival_embedding.py
+    args:
+      model:       qwen3:8b
+      data_format: pqa_combined
+      combined_pool_jsonl: datasets/PubMedQA/rawdata/pubmedqa/pubmedqa_combined_pool/pool_combined.jsonl
+      embed_mode:  both
+      split:       corpus
+      batch_size:  1
+      out_dir:     output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined
+    flags: [use_deepspeed, store_embeddings]
+
+  get_fl_embedding:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_get_retrival_embedding.py
+    foreach_client:
+      n: 10
+      iter_args:
+        combined_pool_jsonl: datasets/PubMedQA/FL_split/pubmedqa_FL_C10_K50_alpha0dot1_minlab10/corpus_clients/client_{i}.jsonl
+        question_output: output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_question_embeddings/client_{i}.pt
+        content_output: output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_content_embeddings/client_{i}.pt
+        out_dir:   output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_{i}
+    args:
+      model:       qwen3:8b
+      data_format: pqa_combined
+      embed_mode:  both
+      split:       corpus
+      batch_size:  1
+    flags: [use_deepspeed, store_embeddings]
+
+  get_fl_train_embedding:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_get_retrival_embedding.py
+    foreach_client:
+      n: 10
+      iter_args:
+        train_json: datasets/PubMedQA/FL_split/pubmedqa_FL_C10_K50_alpha0dot1_minlab10/train_clients/client_{i}.json
+        question_output: output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_train_question_embeddings/client_{i}.pt
+        out_dir:   output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_train_{i}
+    args:
+      model:       qwen3:8b
+      data_format: pqa_fl
+      embed_mode:  question
+      split:       train
+      batch_size:  1
+    flags: [use_deepspeed, store_embeddings]
+
+  no_rag:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_w_retrival.py
+    args:
+      model:          qwen3:8b
+      benchmark_json: datasets/PubMedQA/benchmark.json
+      dataset:        pubmedqa
+      retrieval_mode: none
+      batch_size:     1
+      max_new_tokens: 2
+      out_dir:        output/PubMedQA/wo_rag
+    flags: [use_deepspeed]
+
+  incontext:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_w_retrival.py
+    args:
+      model:                    qwen3:8b
+      benchmark_json:           datasets/PubMedQA/benchmark.json
+      dataset:                  pubmedqa
+      retrieval_mode:           incontext
+      retrieval_source:         combined
+      combined_pool_jsonl:      datasets/PubMedQA/rawdata/pubmedqa/pubmedqa_combined_pool/pool_combined.jsonl
+      combined_embeddings_path: output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined/pubmedqa_embeddings_corpus.pt
+      top_k:                    3
+      batch_size:               1
+      max_new_tokens:           2
+      out_dir:                  output/PubMedQA/incontext_rag_top3
+    flags: [use_deepspeed]
+
+  mlp_train:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_w_retrival_MLP_train.py
+    args:
+      model_name:               Qwen/Qwen3-8B
+      train_json:               datasets/PubMedQA/rawdata/pubmedqa/data/labeled_train_set.json
+      train_embeddings_path:    output/PubMedQA/train_embeddings/Qwen3_8b_pubmedqa_labeled_train/pubmedqa_embeddings_train.pt
+      val_json:                 datasets/PubMedQA/rawdata/pubmedqa/data/test_set.json
+      corpus_embeddings_path:   output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined/pubmedqa_embeddings_corpus.pt
+      content_embeddings_path:  output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined/pubmedqa_content_embeddings_corpus.pt
+      corpus_jsonl:             datasets/PubMedQA/rawdata/pubmedqa/pubmedqa_combined_pool/pool_combined.jsonl
+      batch_size:               1
+      stage1_pretrain:          true
+      stage1_epochs:            6
+      stage1_lr:                6e-3
+      stage1_target_max_tokens: 256
+      stage1_eval_every:        5000
+      stage2_epochs:            20
+      stage2_lr:                2e-5
+      stage2_finetune_topk:     3
+      stage2_eval_every:        500
+      alpha_kl:                 1.0
+      kl_temperature:           1.0
+      teacher_max_chars:        5000
+      eval_max_new_tokens:      2
+      eval_min_new_tokens:      1
+      val_encode_batch_size:    1
+      ckpt_dir:                 output/PubMedQA/mlp_train_centralized
+      tb_dir:                   output/PubMedQA/mlp_train_centralized/tensorboard
+    flags: [stage2_finetuning, stage2_wo_kl]
+
+  fl_mlp_train:
+    script: src/VQA/main_PubMedQA/FL_Qwen3_Batch_PubMedQA_VQA_w_retrival_MLP_train.py
+    args:
+      model_name:                    Qwen/Qwen3-8B
+      client_corpus_dir:             datasets/PubMedQA/FL_split/pubmedqa_FL_C10_K50_alpha0dot1_minlab10/corpus_clients
+      client_train_dir:              datasets/PubMedQA/FL_split/pubmedqa_FL_C10_K50_alpha0dot1_minlab10/train_clients
+      client_question_embeddings_dir: output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_question_embeddings
+      client_content_embeddings_dir:  output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_content_embeddings
+      client_train_embeddings_dir:    output/PubMedQA/FL_client_embeddings/Qwen3_8b_pubmedqa_FL_C10_alpha0dot1_minlab10/client_train_question_embeddings
+      val_json:                      datasets/PubMedQA/rawdata/pubmedqa/data/test_set.json
+      batch_size:                    1
+      fl_method:                     fedRepRag
+      comm_rounds:                   20
+      local_epochs:                  1
+      stage1_pretrain:               true
+      stage1_epochs:                 20
+      stage1_lr:                     6e-3
+      stage1_target_max_tokens:      256
+      stage1_eval_every:             5000
+      stage1_clamp_inj:              100
+      stage2_epochs:                 20
+      stage2_lr:                     2e-5
+      stage2_finetune_topk:          3
+      stage2_eval_every:             500
+      alpha_kl:                      1.0
+      kl_temperature:                1.0
+      teacher_max_chars:             5000
+      eval_max_new_tokens:           2
+      eval_min_new_tokens:           1
+      val_encode_batch_size:         1
+      ckpt_dir:                      output/PubMedQA_FL/mlp_train
+      tb_dir:                        output/PubMedQA_FL/mlp_train/tensorboard
+    flags: [stage2_finetuning, stage2_wo_kl]
+
+  mlp_infer:
+    script: src/VQA/main_PubMedQA/Qwen3_Batch_PubMedQA_VQA_w_retrival.py
+    args:
+      model:                    qwen3:8b
+      benchmark_json:           datasets/PubMedQA/benchmark.json
+      dataset:                  pubmedqa
+      retrieval_mode:           embed_prefix_mlp
+      retrieval_source:         combined
+      combined_pool_jsonl:      datasets/PubMedQA/rawdata/pubmedqa/pubmedqa_combined_pool/pool_combined.jsonl
+      corpus_embeddings_path:   output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined/pubmedqa_embeddings_corpus.pt
+      content_embeddings_path:  output/PubMedQA/corpus_embeddings/Qwen3_8b_pubmedqa_combined/pubmedqa_content_embeddings_corpus.pt
+      # mlp_ckpt: pass via --mlp_ckpt <path>
+      top_k:                    3
+      batch_size:               1
+      max_new_tokens:           2
+      out_dir:                  output/PubMedQA/mlp_rag_top3
+    flags: [use_deepspeed]
